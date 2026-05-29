@@ -7,6 +7,7 @@
 
 import Foundation
 import ARKit
+import ImageIO
 
 func trackingStateToString(_ trackingState: ARCamera.TrackingState) -> String {
         switch trackingState {
@@ -51,6 +52,62 @@ func pixelBufferToUIImage(pixelBuffer: CVPixelBuffer) -> UIImage {
     let cgImage = context.createCGImage(ciImage, from: ciImage.extent)
     let uiImage = UIImage(cgImage: cgImage!)
     return uiImage
+}
+
+// Encode an ARKit sceneDepth Float32 (metres) buffer as a 16-bit single-channel PNG
+// in millimetres at the buffer's NATIVE resolution. No resize, no normalisation,
+// no 8-bit quantisation. The prior path (pixelBufferToUIImage + resizeImageTo +
+// pngData) silently produced 8-bit RGBA at UIScreen 3x — depth saturated to garbage.
+// Invalid samples (NaN, Inf, ≤0) map to 0; values ≥65.535 m clamp to 65535.
+func depthFloat32BufferToMM16PNGData(_ pixelBuffer: CVPixelBuffer) -> Data? {
+    CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
+    defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
+
+    let width = CVPixelBufferGetWidth(pixelBuffer)
+    let height = CVPixelBufferGetHeight(pixelBuffer)
+    let srcBytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer)
+    guard let baseRaw = CVPixelBufferGetBaseAddress(pixelBuffer) else { return nil }
+
+    var mmBuffer = [UInt16](repeating: 0, count: width * height)
+    for y in 0..<height {
+        let rowPtr = baseRaw.advanced(by: y * srcBytesPerRow).assumingMemoryBound(to: Float32.self)
+        let rowBase = y * width
+        for x in 0..<width {
+            let meters = rowPtr[x]
+            if meters.isFinite && meters > 0 {
+                let mm = meters * 1000.0
+                mmBuffer[rowBase + x] = mm >= 65535.0 ? 65535 : UInt16(mm)
+            }
+            // else leaves 0 (sentinel for invalid)
+        }
+    }
+
+    let outputData = NSMutableData()
+    let success: Bool = mmBuffer.withUnsafeBufferPointer { ptr -> Bool in
+        guard let bytes = ptr.baseAddress else { return false }
+        let length = ptr.count * MemoryLayout<UInt16>.size
+        guard let provider = CGDataProvider(data: NSData(bytes: bytes, length: length)) else { return false }
+        let bitmapInfo = CGBitmapInfo(
+            rawValue: CGImageAlphaInfo.none.rawValue | CGBitmapInfo.byteOrder16Little.rawValue
+        )
+        guard let cgImage = CGImage(
+            width: width,
+            height: height,
+            bitsPerComponent: 16,
+            bitsPerPixel: 16,
+            bytesPerRow: width * 2,
+            space: CGColorSpaceCreateDeviceGray(),
+            bitmapInfo: bitmapInfo,
+            provider: provider,
+            decode: nil,
+            shouldInterpolate: false,
+            intent: .defaultIntent
+        ) else { return false }
+        guard let dest = CGImageDestinationCreateWithData(outputData, "public.png" as CFString, 1, nil) else { return false }
+        CGImageDestinationAddImage(dest, cgImage, nil)
+        return CGImageDestinationFinalize(dest)
+    }
+    return success ? (outputData as Data) : nil
 }
 
 func getDocumentsDirectory() -> URL {

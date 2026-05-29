@@ -67,7 +67,11 @@ class DatasetWriter {
         manifest.cx =  320
         manifest.cy =  240
         
-        manifest.depthIntegerScale = 1.0
+        // Depth PNGs are 16-bit single-channel millimetres at the LiDAR's native 256x192
+        // — metres = pixel * depthIntegerScale. The previous 1.0 only made sense for the
+        // (broken) 8-bit RGBA depth viz path; consumers reading that as metric would have
+        // been off by 1000x even ignoring the saturation bug.
+        manifest.depthIntegerScale = 0.001
         currentFrameCounter = 0
         writerState = .SessionStarted
     }
@@ -171,7 +175,11 @@ class DatasetWriter {
 
         let frameMetadata = getFrameMetadata(frame, withDepth: useDepth, withConfidence: useConfidence)
         let rgbBuffer = pixelBufferToUIImage(pixelBuffer: frame.capturedImage)
-        let depthBuffer = useDepth ? pixelBufferToUIImage(pixelBuffer: frame.sceneDepth!.depthMap).resizeImageTo(size:  frame.camera.imageResolution) : nil
+        // Native 256x192, 16-bit single-channel mm. The old pixelBufferToUIImage + resizeImageTo
+        // + pngData path quantised Float32 metres to 8-bit RGBA and screen-3x upscaled it,
+        // saturating depth to ~255 garbage. The metric path now reads the Float32 buffer
+        // directly and writes a 16-bit grayscale PNG at the LiDAR's native resolution.
+        let depthPNGData = useDepth ? depthFloat32BufferToMM16PNGData(frame.sceneDepth!.depthMap) : nil
         // Native 256x192 — bilinear resize would corrupt raw 0/1/2 ARConfidenceLevel values.
         let confidenceBuffer = useConfidence ? pixelBufferToUIImage(pixelBuffer: frame.sceneDepth!.confidenceMap!) : nil
 
@@ -179,9 +187,8 @@ class DatasetWriter {
             do {
                 let rgbData = rgbBuffer.pngData()
                 try rgbData?.write(to: fileName)
-                if useDepth {
-                    let depthData = depthBuffer!.pngData()
-                    try depthData?.write(to: depthFileName)
+                if useDepth, let depthData = depthPNGData {
+                    try depthData.write(to: depthFileName)
                 }
                 if useConfidence {
                     let confidenceData = confidenceBuffer!.pngData()
