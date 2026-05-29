@@ -94,17 +94,48 @@ class DatasetWriter {
         let manifest_path = getDocumentsDirectory()
             .appendingPathComponent(projectName)
             .appendingPathComponent("transforms.json")
-        
+
         writeManifestToPath(path: manifest_path)
+        // Snapshot before async — guard against initializeProject() landing a new value
+        // mid-finalize and our cleanup nuking the wrong directory.
+        let dirToFinalize = self.projectDir
+        let nameToFinalize = self.projectName
         DispatchQueue.global().async {
-            do {
-                if zip {
-                    let _ = try Zip.quickZipFiles([self.projectDir], fileName: self.projectName)
+            if zip {
+                // Day-1 observation: Zip.quickZipFiles silently failed on ~5/8 captures,
+                // leaving a partial .zip (no end-of-central-directory) that `unzip -t`
+                // rejects. The original do/catch swallowed the error as "Could not zip"
+                // with no detail and offered no recovery path. Now: surface the actual
+                // error, retry once after cleaning the partial output, and on final
+                // failure delete the partial .zip + preserve the project dir so
+                // devicectl can pull the raw files.
+                let zipURL = getDocumentsDirectory().appendingPathComponent("\(nameToFinalize).zip")
+                var zipOK = false
+                for attempt in 1...2 {
+                    if FileManager.default.fileExists(atPath: zipURL.path) {
+                        try? FileManager.default.removeItem(at: zipURL)
+                    }
+                    do {
+                        let _ = try Zip.quickZipFiles([dirToFinalize], fileName: nameToFinalize)
+                        zipOK = true
+                        break
+                    } catch {
+                        print("NeRFCapture: Zip attempt \(attempt)/2 failed: \(error.localizedDescription)")
+                    }
                 }
-                try FileManager.default.removeItem(at: self.projectDir)
+                if !zipOK {
+                    if FileManager.default.fileExists(atPath: zipURL.path) {
+                        try? FileManager.default.removeItem(at: zipURL)
+                    }
+                    print("NeRFCapture: zip failed both attempts. Project dir preserved at \(dirToFinalize.path)")
+                    print("NeRFCapture: recover via `xcrun devicectl device copy from --source Documents/\(nameToFinalize) ...`, then `zip -qr` locally.")
+                    return
+                }
             }
-            catch {
-                print("Could not zip")
+            do {
+                try FileManager.default.removeItem(at: dirToFinalize)
+            } catch {
+                print("NeRFCapture: zip OK but project-dir cleanup failed at \(dirToFinalize.path): \(error.localizedDescription)")
             }
         }
     }
