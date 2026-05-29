@@ -109,13 +109,15 @@ class DatasetWriter {
         return frameName
     }
     
-    func getFrameMetadata(_ frame: ARFrame, withDepth: Bool = false) -> Manifest.Frame {
+    func getFrameMetadata(_ frame: ARFrame, withDepth: Bool = false, withConfidence: Bool = false) -> Manifest.Frame {
         let frameName = getCurrentFrameName()
         let filePath = "images/\(frameName)"
         let depthPath = "images/\(frameName).depth.png"
+        let confidencePath = "images/\(frameName).confidence.png"
         let manifest_frame = Manifest.Frame(
             filePath: filePath,
             depthPath: withDepth ? depthPath : nil,
+            confidencePath: withConfidence ? confidencePath : nil,
             transformMatrix: arrayFromTransform(frame.camera.transform),
             timestamp: frame.timestamp,
             flX:  frame.camera.intrinsics[0, 0],
@@ -144,13 +146,16 @@ class DatasetWriter {
     func writeFrameToDisk(frame: ARFrame, useDepthIfAvailable: Bool = true) {
         let frameName =  "\(getCurrentFrameName()).png"
         let depthFrameName =  "\(getCurrentFrameName()).depth.png"
+        let confidenceFrameName =  "\(getCurrentFrameName()).confidence.png"
         let baseDir = projectDir
             .appendingPathComponent("images")
         let fileName = baseDir
             .appendingPathComponent(frameName)
         let depthFileName = baseDir
             .appendingPathComponent(depthFrameName)
-        
+        let confidenceFileName = baseDir
+            .appendingPathComponent(confidenceFrameName)
+
         if manifest.w == 0 {
             manifest.w = Int(frame.camera.imageResolution.width)
             manifest.h = Int(frame.camera.imageResolution.height)
@@ -159,13 +164,16 @@ class DatasetWriter {
             manifest.cx =  frame.camera.intrinsics[2, 0]
             manifest.cy =  frame.camera.intrinsics[2, 1]
         }
-        
+
         let useDepth = frame.sceneDepth != nil && useDepthIfAvailable
-        
-        let frameMetadata = getFrameMetadata(frame, withDepth: useDepth)
+        let useConfidence = useDepth && frame.sceneDepth!.confidenceMap != nil
+
+        let frameMetadata = getFrameMetadata(frame, withDepth: useDepth, withConfidence: useConfidence)
         let rgbBuffer = pixelBufferToUIImage(pixelBuffer: frame.capturedImage)
         let depthBuffer = useDepth ? pixelBufferToUIImage(pixelBuffer: frame.sceneDepth!.depthMap).resizeImageTo(size:  frame.camera.imageResolution) : nil
-        
+        // Native 256x192 — bilinear resize would corrupt raw 0/1/2 ARConfidenceLevel values.
+        let confidenceBuffer = useConfidence ? pixelBufferToUIImage(pixelBuffer: frame.sceneDepth!.confidenceMap!) : nil
+
         DispatchQueue.global().async {
             do {
                 let rgbData = rgbBuffer.pngData()
@@ -173,6 +181,10 @@ class DatasetWriter {
                 if useDepth {
                     let depthData = depthBuffer!.pngData()
                     try depthData?.write(to: depthFileName)
+                }
+                if useConfidence {
+                    let confidenceData = confidenceBuffer!.pngData()
+                    try confidenceData?.write(to: confidenceFileName)
                 }
             }
             catch {

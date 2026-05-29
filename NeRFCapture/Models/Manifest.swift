@@ -11,6 +11,7 @@ struct Manifest : Codable {
     struct Frame : Codable {
         let filePath: String
         let depthPath: String?
+        let confidencePath: String?
         let transformMatrix: [[Float]]
         let timestamp: TimeInterval
         let flX: Float
