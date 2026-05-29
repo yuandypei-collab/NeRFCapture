@@ -68,6 +68,7 @@ class DatasetWriter {
         manifest.cy =  240
         
         manifest.depthIntegerScale = 1.0
+        currentFrameCounter = 0
         writerState = .SessionStarted
     }
     
