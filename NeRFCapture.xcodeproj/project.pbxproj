@@ -23,6 +23,9 @@
 		C0C52AAA287EC2470011820F /* ARViewContainer.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0C52AA9287EC2470011820F /* ARViewContainer.swift */; };
 		C0C52AAC287EC26A0011820F /* Manifest.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0C52AAB287EC26A0011820F /* Manifest.swift */; };
 		C0C52AAE287EC33D0011820F /* AppState.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0C52AAD287EC33D0011820F /* AppState.swift */; };
+		01000000000000000000A001 /* CoverageMath.swift in Sources */ = {isa = PBXBuildFile; fileRef = 01000000000000000000A002 /* CoverageMath.swift */; };
+		01000000000000000000A003 /* CoverageMeter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 01000000000000000000A004 /* CoverageMeter.swift */; };
+		01000000000000000000A005 /* CoverageOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = 01000000000000000000A006 /* CoverageOverlay.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXCopyFilesBuildPhase section */
@@ -57,6 +60,9 @@
 		C0C52AA9287EC2470011820F /* ARViewContainer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ARViewContainer.swift; sourceTree = "<group>"; };
 		C0C52AAB287EC26A0011820F /* Manifest.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Manifest.swift; sourceTree = "<group>"; };
 		C0C52AAD287EC33D0011820F /* AppState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppState.swift; sourceTree = "<group>"; };
+		01000000000000000000A002 /* CoverageMath.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoverageMath.swift; sourceTree = "<group>"; };
+		01000000000000000000A004 /* CoverageMeter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoverageMeter.swift; sourceTree = "<group>"; };
+		01000000000000000000A006 /* CoverageOverlay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoverageOverlay.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -138,6 +144,8 @@
 				057A7AA72950092E000692A0 /* Shaders.metal */,
 				050A8EF9296E738200C5C638 /* DatasetWriter.swift */,
 				050A8EFB296E8B8E00C5C638 /* DDSWriter.swift */,
+				01000000000000000000A002 /* CoverageMath.swift */,
+				01000000000000000000A004 /* CoverageMeter.swift */,
 			);
 			path = NeRFCapture;
 			sourceTree = "<group>";
@@ -163,6 +171,7 @@
 			children = (
 				C0C52A91287E7F940011820F /* ContentView.swift */,
 				C0C52AA9287EC2470011820F /* ARViewContainer.swift */,
+				01000000000000000000A006 /* CoverageOverlay.swift */,
 			);
 			path = Views;
 			sourceTree = "<group>";
@@ -267,6 +276,9 @@
 				057A7AA82950092E000692A0 /* Shaders.metal in Sources */,
 				C0C52AA3287EC19A0011820F /* Utils.swift in Sources */,
 				C0C52AA8287EC2390011820F /* ARViewModel.swift in Sources */,
+				01000000000000000000A001 /* CoverageMath.swift in Sources */,
+				01000000000000000000A003 /* CoverageMeter.swift in Sources */,
+				01000000000000000000A005 /* CoverageOverlay.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

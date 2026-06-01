@@ -3,6 +3,7 @@
 //  NeRFCapture
 //
 //  Created by Jad Abou-Chakra on 13/7/2022.
+//  Otterly Spike 2: overlaid the guidance HUD (CoverageOverlay) while an Offline capture is running.
 //
 
 import SwiftUI
@@ -13,11 +14,11 @@ import RealityKit
 struct ContentView : View {
     @StateObject private var viewModel: ARViewModel
     @State private var showSheet: Bool = false
-    
+
     init(viewModel vm: ARViewModel) {
         _viewModel = StateObject(wrappedValue: vm)
     }
-    
+
     var body: some View {
         ZStack{
             ZStack(alignment: .topTrailing) {
@@ -53,13 +54,13 @@ struct ContentView : View {
                             .pickerStyle(.segmented)
                             .disabled(viewModel.appState.writerState
                                       != .SessionNotStarted)
-                            
+
                             Spacer()
                         }
                     }.padding(8)
                     HStack() {
                         Spacer()
-                        
+
                         VStack(alignment:.leading) {
                             Text("\(viewModel.appState.trackingState)")
                             if case .Online = viewModel.appState.appMode {
@@ -70,7 +71,7 @@ struct ContentView : View {
                                     Text("\(viewModel.datasetWriter.currentFrameCounter) Frames")
                                 }
                             }
-                            
+
                             if viewModel.appState.supportsDepth {
                                 Text("Depth Supported")
                             }
@@ -78,6 +79,13 @@ struct ContentView : View {
                     }
                 }
             }
+
+            // Otterly Spike 2: live guidance HUD while an Offline capture is running
+            if case .Offline = viewModel.appState.appMode,
+               viewModel.appState.writerState == .SessionStarted {
+                CoverageOverlay(viewModel: viewModel)
+            }
+
             VStack {
                 Spacer()
                 HStack(spacing: 20) {
@@ -107,7 +115,7 @@ struct ContentView : View {
                     if case .Offline = viewModel.appState.appMode {
                         if viewModel.appState.writerState == .SessionNotStarted {
                             Spacer()
-                            
+
                             Button(action: {
                                 viewModel.resetWorldOrigin()
                             }) {
@@ -117,7 +125,7 @@ struct ContentView : View {
                             }
                             .buttonStyle(.bordered)
                             .buttonBorderShape(.capsule)
-                            
+
                             Button(action: {
                                 do {
                                     try viewModel.datasetWriter.initializeProject()
@@ -133,7 +141,7 @@ struct ContentView : View {
                             .buttonStyle(.borderedProminent)
                             .buttonBorderShape(.capsule)
                         }
-                        
+
                         if viewModel.appState.writerState == .SessionStarted {
                             Spacer()
                             Button(action: {
