@@ -28,20 +28,15 @@ struct AppState {
     var ddsPeers: UInt32 = 0
     var ddsReady = false
 
-    // --- Otterly guidance prototype (Spike 2) — published live from CoverageMeter ---
-    var coverageGreenFrac: Float = 0          // fraction of object surface seen from wide-enough angles
-    var coverageVoxels: Int = 0               // observed surface voxels (debug / sanity)
-    // gate grid captured-from flags, flat index = orbitSector * elevBins + elevBand.
-    // Size sourced from CoverageMeter (single source of truth) so it can't drift from the meter's grid.
-    var capturedCells: [Bool] = Array(repeating: false, count: CoverageMeter.orbitBins * CoverageMeter.elevBins)
+    // --- Otterly guidance prototype (v2) — published live from CoverageMeter ---
+    var coverageGreenFrac: Float = 0          // fraction of admitted surface seen from wide-enough angles (quality %)
+    var coverageVoxels: Int = 0               // admitted (>=3-frame) whole-house surface voxels (debug / sanity)
     var nextAngleAz: Double? = nil            // recommended orbit azimuth (world x-z, deg); nil = covered/diffuse
     var nextAngleGap: Double = 0              // width of the missing wedge (deg)
-    var autoCapture: Bool = true              // coverage-gated auto-shutter on/off (Andy's choice: ON by default)
+    var autoCapture: Bool = true              // quality-gated auto-shutter on/off (Andy's choice: ON by default)
     var autoCaptureCount: Int = 0             // frames auto-captured this session
     var sessionStart: Date? = nil             // for the elapsed-time display
-    // v1.3 adaptive elev-band warmup status (drives HUD hint; auto-capture defers until done)
-    var calibratingHeight: Bool = true
-    var calibrationProgress: Float = 0        // 0..1
+    var holdSteady: Bool = false              // phone moving too fast for a clean capture -> HUD "稳住"
 }
 
 struct AppSettings: Codable {

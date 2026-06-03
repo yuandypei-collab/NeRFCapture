@@ -1,14 +1,19 @@
 //
-//  CoverageMath.swift  (Otterly Spike 2 — guidance prototype)
+//  CoverageMath.swift  (Otterly — guidance prototype)
 //
 //  Pure viewing-pose-coverage scoring. NO ARKit / UIKit imports, so it compiles on the macOS
-//  command line (`swiftc CoverageMath.swift coverage_selftest.swift`) for a sign/geometry self-test
-//  before any device time — same discipline as mac_capture_selfcheck.swift.
+//  command line (`swiftc CoverageMath.swift CoverageMeter.swift coverage_selftest.swift`) for a
+//  sign/geometry self-test before any device time — same discipline as mac_capture_selfcheck.swift.
 //
-//  This is the offline-VALIDATED metric from coverage_meter.py ported verbatim:
+//  This is the offline-VALIDATED quality metric (from coverage_meter.py):
 //    - each surface voxel records which AZIMUTH bins (12 x 30 deg) a camera viewed it from,
-//    - "green" once that azimuth span >= SPAN_OK (the locked quality signal = wider viewing-pose coverage),
+//    - "green" once that azimuth span >= SPAN_OK (the locked quality signal = wider viewing-pose
+//      coverage / parallax = the triangulation angle subtended at the region by the cameras),
 //    - next-angle = midpoint of the widest missing azimuth wedge over the under-covered surface.
+//
+//  v2 (2026-06-02): the orbit-sector / elevation-band GATE helpers were removed. Auto-capture is now
+//  driven directly by this region-quality metric (a frame is captured when it adds new viewing-angle
+//  coverage to under-covered regions — see CoverageMeter), not by a separate device-orientation grid.
 //
 import Foundation
 
@@ -69,28 +74,5 @@ enum CoverageMath {
         if length == 0 { return nil }
         let az = ((Double(start) + Double(length) / 2.0).truncatingRemainder(dividingBy: Double(nAz))) * degPerBin
         return (az, Double(length) * degPerBin)
-    }
-
-    // --- auto-capture GATE cells (capture POLICY, NOT the quality metric) -------------------------
-    // The gate fires per (camera orbit sector x elevation band) cell, so it (a) does not stop after one
-    // horizontal orbit and (b) requires HEIGHT variation (the locked protocol's "vary height"). These
-    // are separate from the azimuth-only green quality metric above, which stays as validated.
-    // v1.2 (2026-06-01): range raised from [-15, 75] to [15, 90] so the LOW band is reachable for
-    // small floor objects. Old range needed camera within ~27cm of the floor at 1m horizontal to
-    // trigger inner band — physically blocked by the floor for any bottle-sized object.
-    // New 3-band split: low [15, 40), mid [40, 65), high [65, 90].
-    static let elevMinDeg = 15.0      // elevation banding range floor (camera elevation above object centre)
-    static let elevSpanDeg = 75.0     // span covered by the bands (3 bands x 25 deg over [15, 90])
-
-    static func orbitSector(azimuthDeg: Double, bins: Int) -> Int {
-        let a = azimuthDeg.truncatingRemainder(dividingBy: 360.0)
-        let pos = a < 0 ? a + 360.0 : a
-        return min(bins - 1, Int(pos / (360.0 / Double(bins))))
-    }
-
-    static func elevBand(elevDeg: Double, bands: Int) -> Int {
-        let w = elevSpanDeg / Double(bands)
-        let i = Int(floor((elevDeg - elevMinDeg) / w))
-        return max(0, min(bands - 1, i))
     }
 }

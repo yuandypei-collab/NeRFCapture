@@ -1,14 +1,14 @@
 //
-//  CoverageOverlay.swift  (Otterly Spike 2 — guidance prototype, v1.1)
+//  CoverageOverlay.swift  (Otterly — guidance prototype, v2)
 //
 //  On-screen AR guidance HUD for handheld iPhone capture (NOT an immersive mesh — see the track memo).
-//  Surfaces the locked quality signal (wider viewing-pose coverage) live:
-//    - "quality coverage %" = green-fraction of object surface seen from wide-enough angles,
-//    - a top-down ORBIT GRID = elevBins concentric rings (inner=low / mid / outer=high camera height) x
-//      orbitBins azimuth sectors; a dot turns green once captured from that (direction x height) — so
-//      HEIGHT is a visible dimension (v1.1 fix: capture no longer stops after one flat horizontal orbit),
-//    - a NEXT-ANGLE arrow pointing at the widest missing wedge ("go shoot from here"),
-//    - the timer Andy asked for (elapsed + auto-captured count) + the auto-capture toggle.
+//  v2 (2026-06-02): the device-orientation "center-disk" (orbit-sector x elevation-band dots) is gone.
+//  The HUD now surfaces the validated REGION quality signal directly:
+//    - "quality coverage %" = green-fraction of admitted (stably-seen) surface that has wide-enough
+//      viewing-angle coverage (parallax),
+//    - a NEXT-ANGLE arrow pointing at the widest under-covered azimuth wedge ("go shoot more angles here"),
+//    - a "稳住" prompt when the phone is moving too fast for a clean (sharp) capture,
+//    - the timer + auto-captured count + the auto-capture toggle.
 //
 import SwiftUI
 
@@ -16,10 +16,6 @@ struct CoverageOverlay: View {
     @ObservedObject var viewModel: ARViewModel
 
     private var s: AppState { viewModel.appState }
-    // computed (NOT stored): a private stored property would make CoverageOverlay's synthesized
-    // memberwise init private, breaking CoverageOverlay(viewModel:) from ContentView (another file).
-    private var azN: Int { CoverageMeter.orbitBins }
-    private var elN: Int { CoverageMeter.elevBins }
 
     var body: some View {
         VStack {
@@ -27,7 +23,7 @@ struct CoverageOverlay: View {
             Spacer()
             ring
                 .frame(width: 210, height: 210)
-            Text(heightHint)
+            Text(hint)
                 .font(.system(size: 11, weight: .medium, design: .rounded))
                 .foregroundStyle(.white.opacity(0.85))
                 .padding(.horizontal, 10).padding(.vertical, 4)
@@ -62,22 +58,11 @@ struct CoverageOverlay: View {
         return String(format: "%d:%02d", e / 60, e % 60)
     }
 
-    // top-down orbit grid: elN concentric rings (height bands) x azN sector dots + next-angle arrow + centre %
+    // compass: quality % in the centre + a next-angle arrow at the widest under-covered azimuth wedge.
     private var ring: some View {
         Canvas { ctx, size in
             let c = CGPoint(x: size.width / 2, y: size.height / 2)
             let R = min(size.width, size.height) / 2 - 14
-            let cells = s.capturedCells
-            for e in 0..<elN {
-                let rr = R * (0.45 + 0.235 * CGFloat(e))      // inner ring = low height, outer = high
-                for a in 0..<azN {
-                    let p = point(c: c, r: rr, azimuthDeg: Double(a) * 360.0 / Double(azN))
-                    let idx = a * elN + e
-                    let on = idx < cells.count && cells[idx]
-                    let dot = Path(ellipseIn: CGRect(x: p.x - 3, y: p.y - 3, width: 6, height: 6))
-                    ctx.fill(dot, with: .color(on ? .green : .white.opacity(0.22)))
-                }
-            }
             if let az = s.nextAngleAz {
                 let tip = point(c: c, r: R, azimuthDeg: az)
                 var line = Path(); line.move(to: c); line.addLine(to: tip)
@@ -86,7 +71,7 @@ struct CoverageOverlay: View {
             }
             let pct = Int((s.coverageGreenFrac * 100).rounded())
             ctx.draw(Text("\(pct)%").font(.system(size: 30, weight: .bold, design: .rounded))
-                        .foregroundColor(.white), at: c)
+                        .foregroundColor(s.holdSteady ? .yellow : .white), at: c)
             ctx.draw(Text("quality").font(.system(size: 10, weight: .medium, design: .rounded))
                         .foregroundColor(.white.opacity(0.8)), at: CGPoint(x: c.x, y: c.y + 22))
             ctx.draw(Text("coverage").font(.system(size: 10, weight: .medium, design: .rounded))
@@ -95,30 +80,16 @@ struct CoverageOverlay: View {
         .background(.black.opacity(0.30), in: Circle())
     }
 
-    // guidance hint. When no under-covered azimuth wedge remains, communicate "broad enough" (the gate
-    // naturally stops finding new cells then — so stopping reads as "covered", not as the v1 "stuck at 24").
-    // Otherwise nudge toward the least-captured height band so HEIGHT variation is encouraged.
-    private var heightHint: String {
-        // v1.3 adaptive bands: during warmup, communicate that we're learning the user's actual handheld
-        // elev envelope so all three rings span what they can physically reach (no unreachable outer).
-        if s.calibratingHeight {
-            return String(format: "校准高度范围 %.0f%% · 边拍边轻微变高度",
-                          s.calibrationProgress * 100)
-        }
-        // nil nextAngleAz is overloaded (no wedge / not-computed-yet / diffuse), so require enough observed
-        // surface before saying anything, and state only what's known ("no obvious under-covered azimuth").
+    // region-quality guidance line.
+    private var hint: String {
+        if s.holdSteady { return "稳住 · 别动，等它拍这一下" }
         if s.coverageVoxels > 300 && s.nextAngleAz == nil {
-            return "未见明显欠覆盖方位 · 换个高度补充，或结束采集"
+            return "角度已充分 · 可换个区域，或结束采集"
         }
-        let cells = s.capturedCells
-        var counts = [Int](repeating: 0, count: elN)
-        for e in 0..<elN {
-            for a in 0..<azN { let i = a * elN + e; if i < cells.count && cells[i] { counts[e] += 1 } }
+        if s.nextAngleAz != nil {
+            return "绕到箭头方向 · 给这块多拍几个角度"
         }
-        guard let minE = counts.indices.min(by: { counts[$0] < counts[$1] }) else { return "环: 内低·中平·外高" }
-        let names = ["低", "平", "高"]
-        let label = minE < names.count ? names[minE] : "\(minE)"
-        return "环: 内低·中平·外高   →  多拍「\(label)」角度"
+        return "慢慢绕着拍 · 每块从多个角度看一遍"
     }
 
     private func point(c: CGPoint, r: CGFloat, azimuthDeg: Double) -> CGPoint {
