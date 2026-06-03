@@ -1,197 +1,156 @@
 //
-//  CoverageMeter.swift  (Otterly Spike 2 — guidance prototype, v1.1)
+//  CoverageMeter.swift  (Otterly — guidance prototype, v2)
 //
-//  Live port of the offline-validated coverage_meter.py. Consumes the SAME inputs a phone has live
-//  (ARKit pose + LiDAR depth) and maintains, incrementally, the per-surface viewing-pose coverage.
-//  Drives the guidance HUD (green-fraction + heatmap-from-above + next-angle arrow) and the
-//  coverage-gated auto-shutter.
+//  Live, on-device REGION-centric + QUALITY-GATED coverage. Consumes what a phone has live (ARKit pose
+//  + LiDAR depth + per-pixel confidence) and maintains, incrementally, per-surface-voxel viewing-angle
+//  coverage over the WHOLE space (no object crop). Drives the guidance HUD (quality % + next-angle arrow)
+//  and the quality-gated auto-shutter (fire when a steady frame ADDS new viewing-angle coverage).
 //
-//  v1.1 device-feedback fixes (Andy, 2026-05-31):
-//    - GATE is now (orbit-sector x elevation-band) cells, not azimuth-only: capture no longer stops
-//      after one horizontal orbit (was 24 frames) AND height variation is required/tracked. The GATE
-//      is capture POLICY; the green QUALITY metric stays azimuth-only as validated (CoverageMath).
-//    - next-angle is recomputed at ~naThrottle (not every frame) and cached -> removes the growing
-//      O(voxels) per-frame cost that made the live view stutter over time.
-//    - update() takes a copied depth [Float] (the caller extracts it from the ARFrame on the AR queue,
-//      then runs the meter on a background serial queue) -> the heavy work is off the render path.
+//  v2 (2026-06-02) — replaces the v1.x device-orientation "center-disk" gate (orbit-sector x elevation-band)
+//  with the validated parallax signal driving capture directly. Changes vs v1.3 (codex B-gate REVISE,
+//  all points incorporated):
+//    - WHOLE-HOUSE: removed the 1 m object-crop -> every observed surface voxel is tracked.
+//    - VOXEL ADMISSION: a voxel counts (denominator / green / informative) only after >= admitObs DISTINCT
+//      frames have seen it -> a single noisy/edge/sparse LiDAR sample can no longer create a fake region.
+//    - CONFIDENCE FILTER: only depth pixels with ARKit confidence >= confMin are used.
+//    - BEARING from the observed HIT POINT (validated) = angle-AT-region (true triangulation angle), not
+//      device orientation. One bearing per voxel per frame; across frames these accumulate into the span.
+//    - INFORMATIVE: update() reports whether this frame added a new azimuth bin to >= minInformativeVoxels
+//      under-covered admitted voxels -> the caller fires the shutter only on such frames (no redundant shots).
+//  Steadiness (sharp-frame) gating lives in the caller (ARViewModel): only steady frames reach update().
 //
 //  THREADING: NOT thread-safe; all methods must be called from one serial queue (ARViewModel.coverageQueue).
 //
 import Foundation
 import simd
 
-struct GateState {
-    let azBin: Int
-    let elevBand: Int
-    let isNew: Bool          // this (sector x band) cell has not been captured from yet
-    let valid: Bool
+/// Per-frame ingest result.
+struct CoverageUpdate {
+    let informative: Bool   // frame added a new azimuth bin to >= minInformativeVoxels under-covered admitted voxels
+    let valid: Bool         // had usable (confidence-filtered) depth this frame
 }
 
 final class CoverageMeter {
-    // --- geometry / quality-metric constants (match coverage_meter.py) ---
-    static let voxel: Float = 0.05         // surface voxel size (m)
-    // v1.3 (2026-06-01): cropR tightened from 2.5 to 1.0 m. The locked validated metric is the
-    // azimuth-span green count over the CROP SPHERE; 2.5 m worked for room-scale capture but for
-    // handheld object capture it pulled in floor/wall voxels that only get scanned from a narrow
-    // azimuth wedge, inflating the denominator and pinning coverage % at ~10-15% even when the
-    // gate cells were largely filled. 1.0 m still covers a generous bottle/box-sized object.
-    static let cropR: Float = 1.0          // object-crop radius around running look-at centre (m)
-    static let pixStride = 4               // subsample depth pixels (256x192 -> ~3k pts/frame)
-    // --- auto-capture gate grid (capture policy; INDEPENDENT of the green metric's own 12 azimuth bins) ---
-    static let orbitBins = 36              // camera-azimuth sectors (10 deg). 36 x 3 = 108 max cells: lands a
-                                           // fully-covered capture in the empirically-proven ~100-130 frame
-                                           // range (locked finding: well-SPREAD frames matter more than raw
-                                           // count, so this is a ceiling, not a target). Tunable.
-    static let elevBins = 3                // elevation bands (low / mid / high) — the height dimension
-    static let warmupFrames = 30           // v1.3: collect elev samples for ~3 s (10 Hz) to learn the
-                                           // user's actual handheld elev envelope, then split bands by
-                                           // observed P33/P66 — fixes "outer ring unreachable" across
-                                           // arbitrary object heights (floor / table-top / shelf). During
-                                           // warmup the gate is invalid so auto-capture defers.
+    // --- region grid (whole-house) ---
+    static let voxel: Float = 0.10          // surface voxel size (m). Whole-house: coarser than the 0.05 object
+                                            //   metric for voxel-count headroom; still fine guidance granularity
+                                            //   and the validated span>=90 relation is granularity-robust. TUNE.
+    static let pixStride = 4                // subsample depth pixels (256x192 -> ~3k pts/frame)
+    // --- codex B-gate hardening ---
+    static let admitObs: UInt8 = 3          // a voxel counts only after this many DISTINCT frames observed it
+    static let confMin: UInt8 = 1           // keep depth pixels with ARKit confidence >= medium (0=low,1=med,2=high)
+    static let minInformativeVoxels = 12    // a frame is "informative" (-> auto-capture eligible) when it adds a
+                                            //   new azimuth bin to at least this many under-covered admitted voxels
     // --- perf ---
-    static let naThrottle = 5              // recompute next-angle every Nth update (~10Hz/5 = ~2Hz)
+    static let naThrottle = 5               // recompute next-angle every Nth update (~10Hz/5 = ~2Hz)
 
-    // --- voxel store (quality metric, azimuth-only — unchanged from validated Spike 1) ---
-    private var bins: [SIMD3<Int32>: UInt16] = [:]
-    private var greenSet: Set<SIMD3<Int32>> = []
-    private(set) var greenCount = 0
+    // azimuth bitmask (which 30-deg wedges have viewed this voxel) + distinct-frame count.
+    private struct Vox { var occ: UInt16; var frames: UInt8 }
+    private var bins: [SIMD3<Int32>: Vox] = [:]
+    private var greenSet: Set<SIMD3<Int32>> = []   // admitted voxels whose azimuth span >= spanOK
+    private(set) var greenCount = 0                // green among admitted
+    private(set) var admittedCount = 0             // voxels with frames >= admitObs
 
-    // --- running object centre = mean per-frame look-at point ---
-    private var lookSum = SIMD3<Float>(repeating: 0)
-    private var lookN: Float = 0
-    var center: SIMD3<Float> { lookN > 0 ? lookSum / lookN : SIMD3<Float>(repeating: 0) }
-
-    // --- auto-capture gate: which (orbit sector x elevation band) cells captured ---
-    // (qualify the static refs: an instance stored-property default cannot use unqualified static names)
-    private var captured = [Bool](repeating: false, count: CoverageMeter.orbitBins * CoverageMeter.elevBins)
-
-    // --- next-angle cache (throttled) ---
     private var naCache: (azimuth: Double, gapDeg: Double)?
     private var sinceNA = 0
+    private var seenThisFrame = Set<SIMD3<Int32>>()   // per-frame scratch (reused; single-queue)
 
-    // --- v1.3 adaptive elev bands: edges = [P33, P66] of warmup samples; nil while warming up ---
-    private var elevSamples: [Double] = []
-    private var elevEdges: [Double]?
-
-    var voxelCount: Int { bins.count }
-    var greenFrac: Float { bins.isEmpty ? 0 : Float(greenCount) / Float(bins.count) }
-    func capturedCellsFlat() -> [Bool] { captured }
+    var admittedVoxels: Int { admittedCount }
+    var greenFrac: Float { admittedCount == 0 ? 0 : Float(greenCount) / Float(admittedCount) }
     func cachedNextAngle() -> (azimuth: Double, gapDeg: Double)? { naCache }
-    var isWarmingUp: Bool { elevEdges == nil }
-    var warmupProgress: Float {
-        Float(min(elevSamples.count, CoverageMeter.warmupFrames)) / Float(CoverageMeter.warmupFrames)
-    }
 
-    func markCellCaptured(az: Int, elev: Int) {
-        let i = az * CoverageMeter.elevBins + elev
-        if i >= 0 && i < captured.count { captured[i] = true }
-    }
-
-    /// Ingest one ARKit frame (depth already copied to `depth` by the caller). Returns the current
-    /// gate cell + whether it is new (the firing POLICY — interval, cap, tracking — lives in the caller).
+    /// Ingest one STEADY ARKit frame (the caller only forwards frames that pass the steadiness gate).
+    /// `conf` is the per-pixel confidence (same dims as depth); nil/short -> accept all pixels.
     @discardableResult
-    func update(depth: [Float], dw: Int, dh: Int, intrinsics K: simd_float3x3,
-                rgbSize: CGSize, camera c2w: simd_float4x4) -> GateState {
+    func update(depth: [Float], conf: [UInt8]?, dw: Int, dh: Int,
+                intrinsics K: simd_float3x3, rgbSize: CGSize, camera c2w: simd_float4x4) -> CoverageUpdate {
+        guard dw > 0, dh > 0, rgbSize.width > 0, rgbSize.height > 0, depth.count >= dw * dh else {
+            return CoverageUpdate(informative: false, valid: false)
+        }
         let camPos = SIMD3<Float>(c2w.columns.3.x, c2w.columns.3.y, c2w.columns.3.z)
         let R = simd_float3x3(SIMD3(c2w.columns.0.x, c2w.columns.0.y, c2w.columns.0.z),
                               SIMD3(c2w.columns.1.x, c2w.columns.1.y, c2w.columns.1.z),
                               SIMD3(c2w.columns.2.x, c2w.columns.2.y, c2w.columns.2.z))
-        let forward = R * SIMD3<Float>(0, 0, -1)
-        guard dw > 0, dh > 0, rgbSize.width > 0, rgbSize.height > 0, depth.count >= dw * dh else {
-            return GateState(azBin: 0, elevBand: 0, isNew: false, valid: false)   // no usable depth -> not a gate frame
-        }
         let sx = Float(dw) / Float(rgbSize.width), sy = Float(dh) / Float(rgbSize.height)
         let fx = K[0, 0] * sx, fy = K[1, 1] * sy, cx = K[2, 0] * sx, cy = K[2, 1] * sy
+        let hasConf = (conf?.count ?? 0) >= dw * dh
 
-        // Pass A: strided valid samples + mean valid depth (this frame's look-at point)
-        var us: [Int] = [], vs: [Int] = []; var zs: [Float] = []
-        var depthSum: Float = 0
+        seenThisFrame.removeAll(keepingCapacity: true)
+        var informativeHits = 0
+        var anyValid = false
+
         var v = 0
         while v < dh {
             var u = 0
             while u < dw {
-                let z = depth[v * dw + u]
-                if z.isFinite && z > 0 { us.append(u); vs.append(v); zs.append(z); depthSum += z }
+                let idx = v * dw + u
+                let z = depth[idx]
+                if z.isFinite, z > 0, !hasConf || conf![idx] >= CoverageMeter.confMin {
+                    anyValid = true
+                    let xc = (Float(u) + 0.5 - cx) / fx * z
+                    let yc = -(Float(v) + 0.5 - cy) / fy * z
+                    let world = R * SIMD3<Float>(xc, yc, -z) + camPos
+                    let vi = SIMD3<Int32>(Int32(floor(world.x / CoverageMeter.voxel)),
+                                          Int32(floor(world.y / CoverageMeter.voxel)),
+                                          Int32(floor(world.z / CoverageMeter.voxel)))
+                    // one bearing + one frame-count per voxel per frame (dedup within the frame)
+                    if seenThisFrame.insert(vi).inserted {
+                        let azDeg = Double(atan2(camPos.z - world.z, camPos.x - world.x)) * 180.0 / .pi
+                        if addObservation(vi: vi, bin: CoverageMath.azBin(azDeg)) { informativeHits += 1 }
+                    }
+                }
                 u += CoverageMeter.pixStride
             }
             v += CoverageMeter.pixStride
         }
-        if zs.isEmpty { return GateState(azBin: 0, elevBand: 0, isNew: false, valid: false) }  // no valid depth pixels
-        lookSum += camPos + forward * (depthSum / Float(zs.count)); lookN += 1
-        let C = center
-        let cropR2 = CoverageMeter.cropR * CoverageMeter.cropR
+        if !anyValid { return CoverageUpdate(informative: false, valid: false) }
 
-        // Pass B: backproject -> object-crop -> per-voxel azimuth update (the validated quality metric)
-        for i in 0..<zs.count {
-            let z = zs[i]
-            let xc = (Float(us[i]) + 0.5 - cx) / fx * z
-            let yc = -(Float(vs[i]) + 0.5 - cy) / fy * z
-            let world = R * SIMD3<Float>(xc, yc, -z) + camPos
-            if simd_length_squared(world - C) > cropR2 { continue }
-            let vi = SIMD3<Int32>(Int32(floor(world.x / CoverageMeter.voxel)),
-                                  Int32(floor(world.y / CoverageMeter.voxel)),
-                                  Int32(floor(world.z / CoverageMeter.voxel)))
-            let azDeg = Double(atan2(camPos.z - world.z, camPos.x - world.x)) * 180.0 / .pi
-            addObservation(vi: vi, bin: CoverageMath.azBin(azDeg))
-        }
-
-        // throttled next-angle (avoids the growing O(voxels) per-frame scan)
         sinceNA += 1
         if sinceNA >= CoverageMeter.naThrottle { naCache = computeNextAngle(); sinceNA = 0 }
 
-        return gateState(camPos: camPos)
+        return CoverageUpdate(informative: informativeHits >= CoverageMeter.minInformativeVoxels, valid: true)
     }
 
-    /// Incremental occupancy + green count. green is monotone -> once green, skip (O(touched voxels)).
-    private func addObservation(vi: SIMD3<Int32>, bin: Int) {
+    /// Record one frame's observation of a voxel. Returns true iff this frame added a NEW azimuth bin to an
+    /// admitted, not-yet-green voxel (a genuinely informative contribution toward that region's coverage).
+    @discardableResult
+    private func addObservation(vi: SIMD3<Int32>, bin: Int) -> Bool {
         let mask = UInt16(1) << bin
-        if let occ = bins[vi] {
-            if greenSet.contains(vi) || (occ & mask) != 0 { return }
-            let merged = occ | mask
-            bins[vi] = merged
-            if CoverageMath.isGreen(merged) { greenSet.insert(vi); greenCount += 1 }
-        } else {
-            bins[vi] = mask
-            if CoverageMath.isGreen(mask) { greenSet.insert(vi); greenCount += 1 }
+        guard var vox = bins[vi] else {
+            bins[vi] = Vox(occ: mask, frames: 1)     // first sighting (admitObs >= 2 -> not admitted yet)
+            return false
         }
+        let wasGreen = greenSet.contains(vi)
+        let wasAdmitted = vox.frames >= CoverageMeter.admitObs
+        if vox.frames < UInt8.max { vox.frames += 1 }
+        let nowAdmitted = vox.frames >= CoverageMeter.admitObs
+        let isNewBin = (vox.occ & mask) == 0
+        if isNewBin { vox.occ |= mask }
+        bins[vi] = vox
+
+        if nowAdmitted && !wasAdmitted { admittedCount += 1 }
+        // (re)evaluate green when newly admitted (occ may already span >= spanOK from pre-admission frames)
+        // OR when a new bin was added to an already-admitted voxel.
+        if nowAdmitted && !wasGreen && (isNewBin || !wasAdmitted) && CoverageMath.isGreen(vox.occ) {
+            greenSet.insert(vi); greenCount += 1
+        }
+        return nowAdmitted && isNewBin && !wasGreen
     }
 
-    /// Current gate cell = camera orbit sector (azimuth) x elevation band (height) around the centre.
-    /// v1.3: elevation banding is ADAPTIVE — first `warmupFrames` samples define band edges (P33, P66
-    /// of observed elev), so the bands always span the user's actual envelope (no "physically unreachable
-    /// outer ring" for any object height). Gate is invalid during warmup; auto-capture defers.
-    private func gateState(camPos: SIMD3<Float>) -> GateState {
-        guard lookN > 0 else { return GateState(azBin: 0, elevBand: 0, isNew: false, valid: false) }
-        let C = center
-        let dx = camPos.x - C.x, dz = camPos.z - C.z, dy = camPos.y - C.y
-        let horiz = (dx * dx + dz * dz).squareRoot()
-        let azDeg = Double(atan2(dz, dx)) * 180.0 / .pi
-        let elevDeg = Double(atan2(dy, max(horiz, 1e-4))) * 180.0 / .pi
-        let az = CoverageMath.orbitSector(azimuthDeg: azDeg, bins: CoverageMeter.orbitBins)
-
-        if elevEdges == nil {
-            // warmup: collect elev samples, lock band edges once we have enough
-            elevSamples.append(elevDeg)
-            if elevSamples.count >= CoverageMeter.warmupFrames {
-                let s = elevSamples.sorted()
-                let last = s.count - 1
-                let i33 = max(0, min(last, Int(Double(last) * 0.33)))
-                let i66 = max(0, min(last, Int(Double(last) * 0.66)))
-                elevEdges = [s[i33], s[i66]]
-            }
-            return GateState(azBin: az, elevBand: 0, isNew: false, valid: false)   // no auto-capture during warmup
-        }
-        let edges = elevEdges!
-        let el = elevDeg < edges[0] ? 0 : (elevDeg < edges[1] ? 1 : 2)
-        return GateState(azBin: az, elevBand: el, isNew: !captured[az * CoverageMeter.elevBins + el], valid: true)
-    }
-
-    /// Widest missing azimuth wedge over the UNDER-covered surface. O(voxels) — call throttled.
+    /// Widest missing azimuth wedge over the UNDER-covered admitted surface. O(voxels) — call throttled.
     private func computeNextAngle() -> (azimuth: Double, gapDeg: Double)? {
         var hist = [Double](repeating: 0, count: CoverageMath.nAz)
-        for (vi, occ) in bins where !greenSet.contains(vi) {
-            for b in 0..<CoverageMath.nAz where (occ & (UInt16(1) << b)) != 0 { hist[b] += 1 }
+        for (vi, vox) in bins where vox.frames >= CoverageMeter.admitObs && !greenSet.contains(vi) {
+            for b in 0..<CoverageMath.nAz where (vox.occ & (UInt16(1) << b)) != 0 { hist[b] += 1 }
         }
         return CoverageMath.nextAngle(underHist: hist)
+    }
+
+    /// Test-only: simulate one steady frame observing voxel `vi` from azimuth `azDeg` (bypasses depth
+    /// back-projection + per-frame dedup). Exercises the admission / green / informative bookkeeping in
+    /// coverage_selftest.swift on a Mac with no device. Each call = one distinct frame for that voxel.
+    @discardableResult
+    func _testObserve(_ vi: SIMD3<Int32>, _ azDeg: Double) -> Bool {
+        return addObservation(vi: vi, bin: CoverageMath.azBin(azDeg))
     }
 }
